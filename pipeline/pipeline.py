@@ -997,14 +997,8 @@ The Pipeline API
         'Must implement "run_test" in Pipeline sub-class.')
 
   def finalized(self):
-    """Finalizes this Pipeline after execution if it's a generator.
-
-    Default action as the root pipeline is to email the admins with the status.
-    Implementors be sure to call 'was_aborted' to find out if the finalization
-    that you're handling is for a success or error case.
-    """
-    if self.pipeline_id == self.root_pipeline_id:
-      self.send_result_email()
+    """Finalizes this Pipeline after execution if it's a generator."""
+    pass
 
   def finalized_test(self, *args, **kwargs):
     """Finalized this Pipeline in test mode."""
