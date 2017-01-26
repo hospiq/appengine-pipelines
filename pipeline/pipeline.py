@@ -2665,7 +2665,7 @@ class _BaseHandler(webapp.RequestHandler):
 
         for cls in middleware:
             if hasattr(cls, 'response'):
-                cls.request(self.response)
+                cls.response(self.response)
 
     def _init_middleware(self):
         middleware = []
