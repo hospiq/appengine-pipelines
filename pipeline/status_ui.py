@@ -21,9 +21,11 @@ import os
 import pkgutil
 import traceback
 import zipfile
+from functools import wraps
 
+from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotFound
+from django.views.decorators.csrf import csrf_exempt
 from google.appengine.api import users
-from google.appengine.ext import webapp
 
 try:
   import json
@@ -34,151 +36,136 @@ except ImportError:
 import util
 
 
-class _StatusUiHandler(webapp.RequestHandler):
+_RESOURCE_MAP = {
+  '/status': ('ui/status.html', 'text/html'),
+  '/status.css': ('ui/status.css', 'text/css'),
+  '/status.js': ('ui/status.js', 'text/javascript'),
+  '/list': ('ui/root_list.html', 'text/html'),
+  '/list.css': ('ui/root_list.css', 'text/css'),
+  '/list.js': ('ui/root_list.js', 'text/javascript'),
+  '/common.js': ('ui/common.js', 'text/javascript'),
+  '/common.css': ('ui/common.css', 'text/css'),
+  '/jquery-1.4.2.min.js': ('ui/jquery-1.4.2.min.js', 'text/javascript'),
+  '/jquery.treeview.min.js': ('ui/jquery.treeview.min.js', 'text/javascript'),
+  '/jquery.cookie.js': ('ui/jquery.cookie.js', 'text/javascript'),
+  '/jquery.timeago.js': ('ui/jquery.timeago.js', 'text/javascript'),
+  '/jquery.ba-hashchange.min.js': (
+      'ui/jquery.ba-hashchange.min.js', 'text/javascript'),
+  '/jquery.json.min.js': ('ui/jquery.json.min.js', 'text/javascript'),
+  '/jquery.treeview.css': ('ui/jquery.treeview.css', 'text/css'),
+  '/treeview-default.gif': ('ui/images/treeview-default.gif', 'image/gif'),
+  '/treeview-default-line.gif': (
+      'ui/images/treeview-default-line.gif', 'image/gif'),
+  '/treeview-black.gif': ('ui/images/treeview-black.gif', 'image/gif'),
+  '/treeview-black-line.gif': (
+      'ui/images/treeview-black-line.gif', 'image/gif'),
+  '/images/treeview-default.gif': (
+      'ui/images/treeview-default.gif', 'image/gif'),
+  '/images/treeview-default-line.gif': (
+      'ui/images/treeview-default-line.gif', 'image/gif'),
+  '/images/treeview-black.gif': (
+      'ui/images/treeview-black.gif', 'image/gif'),
+  '/images/treeview-black-line.gif': (
+      'ui/images/treeview-black-line.gif', 'image/gif'),
+}
+
+@csrf_exempt
+def statusui_handler(request, resource=''):
   """Render the status UI."""
+  import pipeline  # Break circular dependency
+  if pipeline._ENFORCE_AUTH:
+    if users.get_current_user() is None:
+      logging.debug('User is not logged in')
+      return HttpResponseForbidden()
 
-  _RESOURCE_MAP = {
-    '/status': ('ui/status.html', 'text/html'),
-    '/status.css': ('ui/status.css', 'text/css'),
-    '/status.js': ('ui/status.js', 'text/javascript'),
-    '/list': ('ui/root_list.html', 'text/html'),
-    '/list.css': ('ui/root_list.css', 'text/css'),
-    '/list.js': ('ui/root_list.js', 'text/javascript'),
-    '/common.js': ('ui/common.js', 'text/javascript'),
-    '/common.css': ('ui/common.css', 'text/css'),
-    '/jquery-1.4.2.min.js': ('ui/jquery-1.4.2.min.js', 'text/javascript'),
-    '/jquery.treeview.min.js': ('ui/jquery.treeview.min.js', 'text/javascript'),
-    '/jquery.cookie.js': ('ui/jquery.cookie.js', 'text/javascript'),
-    '/jquery.timeago.js': ('ui/jquery.timeago.js', 'text/javascript'),
-    '/jquery.ba-hashchange.min.js': (
-        'ui/jquery.ba-hashchange.min.js', 'text/javascript'),
-    '/jquery.json.min.js': ('ui/jquery.json.min.js', 'text/javascript'),
-    '/jquery.treeview.css': ('ui/jquery.treeview.css', 'text/css'),
-    '/treeview-default.gif': ('ui/images/treeview-default.gif', 'image/gif'),
-    '/treeview-default-line.gif': (
-        'ui/images/treeview-default-line.gif', 'image/gif'),
-    '/treeview-black.gif': ('ui/images/treeview-black.gif', 'image/gif'),
-    '/treeview-black-line.gif': (
-        'ui/images/treeview-black-line.gif', 'image/gif'),
-    '/images/treeview-default.gif': (
-        'ui/images/treeview-default.gif', 'image/gif'),
-    '/images/treeview-default-line.gif': (
-        'ui/images/treeview-default-line.gif', 'image/gif'),
-    '/images/treeview-black.gif': (
-        'ui/images/treeview-black.gif', 'image/gif'),
-    '/images/treeview-black-line.gif': (
-        'ui/images/treeview-black-line.gif', 'image/gif'),
-  }
+    if not users.is_current_user_admin():
+      logging.debug('User is not admin: %r', users.get_current_user())
+      return HttpResponseForbidden()
 
-  def get(self, resource=''):
-    import pipeline  # Break circular dependency
-    if pipeline._ENFORCE_AUTH:
-      if users.get_current_user() is None:
-        logging.debug('User is not logged in')
-        self.redirect(users.create_login_url(self.request.url))
-        return
+  if resource not in _RESOURCE_MAP:
+    logging.debug('Could not find: %s', resource)
+    return HttpResponseNotFound()
 
-      if not users.is_current_user_admin():
-        logging.debug('User is not admin: %r', users.get_current_user())
-        self.response.out.write('Forbidden')
-        self.response.set_status(403)
-        return
+  relative_path, content_type = _RESOURCE_MAP[resource]
+  path = os.path.join(os.path.dirname(__file__), relative_path)
 
-    if resource not in self._RESOURCE_MAP:
-      logging.debug('Could not find: %s', resource)
-      self.response.set_status(404)
-      self.response.out.write("Resource not found.")
-      self.response.headers['Content-Type'] = 'text/plain'
-      return
+  # It's possible we're inside a zipfile (zipimport).  If so,
+  # __file__ will start with 'something.zip'.
+  if ('.zip' + os.sep) in path:
+    (zip_file, zip_path) = os.path.relpath(path).split('.zip' + os.sep, 1)
+    content = zipfile.ZipFile(zip_file + '.zip').read(zip_path)
+  else:
+    try:
+      content = pkgutil.get_data(__name__, relative_path)
+    except AttributeError:  # Python < 2.6.
+      content = open(path, 'rb').read()
 
-    relative_path, content_type = self._RESOURCE_MAP[resource]
-    path = os.path.join(os.path.dirname(__file__), relative_path)
+  response = HttpResponse(content=content, content_type=content_type)
 
-    # It's possible we're inside a zipfile (zipimport).  If so,
-    # __file__ will start with 'something.zip'.
-    if ('.zip' + os.sep) in path:
-      (zip_file, zip_path) = os.path.relpath(path).split('.zip' + os.sep, 1)
-      content = zipfile.ZipFile(zip_file + '.zip').read(zip_path)
-    else:
-      try:
-        content = pkgutil.get_data(__name__, relative_path)
-      except AttributeError:  # Python < 2.6.
-        content = open(path, 'rb').read()
+  if not pipeline._DEBUG:
+    response["Cache-Control"] = "public, max-age=300"
 
-    if not pipeline._DEBUG:
-      self.response.headers["Cache-Control"] = "public, max-age=300"
-    self.response.headers["Content-Type"] = content_type
-
-    self.response.out.write(content)
+  return response
 
 
-class _BaseRpcHandler(webapp.RequestHandler):
+def _rpc_handler(func):
   """Base handler for JSON-RPC responses.
 
-  Sub-classes should fill in the 'json_response' property. All exceptions will
-  be returned.
+  Functions that use this decorator should just return a dict of JSON-serializable data
   """
-
-  def get(self):
+  @wraps(func)
+  def wrapper(request):
     import pipeline  # Break circular dependency
     if pipeline._ENFORCE_AUTH:
       if not users.is_current_user_admin():
         logging.debug('User is not admin: %r', users.get_current_user())
-        self.response.out.write('Forbidden')
-        self.response.set_status(403)
-        return
+        return HttpResponseForbidden(content='Forbidden')
 
     # XSRF protection
     if (not pipeline._DEBUG and
-        self.request.headers.get('X-Requested-With') != 'XMLHttpRequest'):
+        request.META.get('X-Requested-With') != 'XMLHttpRequest'):
       logging.debug('Request missing X-Requested-With header')
-      self.response.out.write('Request missing X-Requested-With header')
-      self.response.set_status(403)
-      return
+      return HttpResponseForbidden(content='Request missing X-Requested-With header')
 
-    self.json_response = {}
     try:
-      self.handle()
-      output = json.dumps(self.json_response, cls=util.JsonEncoder)
+      json_response = func(request)
+      output = json.dumps(json_response, cls=util.JsonEncoder)
     except Exception, e:
-      self.json_response.clear()
-      self.json_response['error_class'] = e.__class__.__name__
-      self.json_response['error_message'] = str(e)
-      self.json_response['error_traceback'] = traceback.format_exc()
-      output = json.dumps(self.json_response, cls=util.JsonEncoder)
+      json_response = dict(
+        error_class=e.__class__.__name__,
+        error_message=str(e),
+        error_traceback=traceback.format_exc(),
+      )
+      output = json.dumps(json_response, cls=util.JsonEncoder)
 
-    self.response.set_status(200)
-    self.response.headers['Content-Type'] = 'application/json'
-    self.response.headers['Cache-Control'] = 'no-cache'
-    self.response.out.write(output)
+    response = HttpResponse(
+      content=output,
+      content_type='application/json'
+    )
+    response['Cache-Control'] = 'no-cache'
+    return response
 
-  def handle(self):
-    raise NotImplementedError('To be implemented by sub-classes.')
+  return wrapper
 
-
-class _TreeStatusHandler(_BaseRpcHandler):
+@csrf_exempt
+@_rpc_handler
+def treestatus_handler(request):
   """RPC handler for getting the status of all children of root pipeline."""
+  import pipeline  # Break circular dependency
+  return pipeline.get_status_tree(request.REQUEST.get('root_pipeline_id'))
 
-  def handle(self):
-    import pipeline  # Break circular dependency
-    self.json_response.update(
-        pipeline.get_status_tree(self.request.get('root_pipeline_id')))
-
-
-class _ClassPathListHandler(_BaseRpcHandler):
+@csrf_exempt
+@_rpc_handler
+def classpathlist_handler(request):
   """RPC handler for getting the list of all Pipeline classes defined."""
+  import pipeline  # Break circular dependency
+  return dict(classPaths=pipeline.get_pipeline_names())
 
-  def handle(self):
-    import pipeline  # Break circular dependency
-    self.json_response['classPaths'] = pipeline.get_pipeline_names()
-
-
-class _RootListHandler(_BaseRpcHandler):
+@csrf_exempt
+@_rpc_handler
+def rootlist_hanlder(request):
   """RPC handler for getting the status of all root pipelines."""
-
-  def handle(self):
-    import pipeline  # Break circular dependency
-    self.json_response.update(
-        pipeline.get_root_list(
-            class_path=self.request.get('class_path'),
-            cursor=self.request.get('cursor')))
+  import pipeline  # Break circular dependency
+  return pipeline.get_root_list(
+    class_path=request.REQUEST.get('class_path'),
+    cursor=request.REQUEST.get('cursor'))

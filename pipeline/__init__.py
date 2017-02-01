@@ -47,3 +47,5 @@ except ImportError, e:
   _fix_path()
   del logging
   from pipeline import *
+
+urls = 'pipeline.pipeline', 'pipeline', 'pipeline'

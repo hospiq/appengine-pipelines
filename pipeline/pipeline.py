@@ -15,7 +15,11 @@
 # limitations under the License.
 
 """Google App Engine Pipeline API for complex, asynchronous workflows."""
-import importlib
+from functools import wraps
+
+from django.conf.urls import patterns, url
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
+from django.views.decorators.csrf import csrf_exempt
 
 __all__ = [
     # Public API.
@@ -23,8 +27,8 @@ __all__ = [
     'PipelineRuntimeError', 'SlotNotFilledError', 'SlotNotDeclaredError',
     'UnexpectedPipelineError', 'PipelineStatusError', 'Slot', 'Pipeline',
     'PipelineFuture', 'After', 'InOrder', 'Retry', 'Abort', 'get_status_tree',
-    'get_pipeline_names', 'get_root_list', 'create_handlers_map',
-    'set_enforce_auth',
+    'get_pipeline_names', 'get_root_list',
+    'set_enforce_auth'
 ]
 
 import datetime
@@ -47,7 +51,6 @@ from google.appengine.api import users
 from google.appengine.api import taskqueue
 from google.appengine.ext import blobstore
 from google.appengine.ext import db
-from google.appengine.ext import webapp
 
 # pylint: disable=g-import-not-at-top
 # TODO(user): Cleanup imports if/when cloudstorage becomes part of runtime.
@@ -67,7 +70,6 @@ except ImportError:
 
 # Relative imports
 import models
-import status_ui
 import util as mr_util
 
 # pylint: disable=g-bad-name
@@ -143,6 +145,8 @@ class _CallbackTaskError(Error):
 
 
 ################################################################################
+
+_PIPELINE_BASE_PATH = '/_ah/pipeline'
 
 _MAX_BARRIERS_TO_NOTIFY = 10
 
@@ -616,7 +620,7 @@ class Pipeline(object):
     def start(self,
               idempotence_key='',
               queue_name='default',
-              base_path='/_ah/pipeline',
+              base_path=_PIPELINE_BASE_PATH,
               return_task=False,
               countdown=None,
               eta=None):
@@ -2648,198 +2652,133 @@ class _PipelineContext(object):
 
 ################################################################################
 
-MIDDLEWARE_CLASSES = filter(None, os.getenv('GAE_PIPELINE_MIDDLEWARE_CLASSES', '').split(','))
+def _from_taskqueue_only(func):
+    @wraps(func)
+    def wrapper(request):
+        if 'HTTP_X_APPENGINE_TASKNAME' not in request.META:
+            return HttpResponseForbidden()
+        return func(request)
 
+    return wrapper
 
-class _BaseHandler(webapp.RequestHandler):
-    """Custom base handler to allow middleware"""
-
-    def dispatch(self):
-        middleware = self._init_middleware()
-
-        for cls in middleware:
-            if hasattr(cls, 'request'):
-                cls.request(self.request)
-
-        webapp.RequestHandler.dispatch(self)
-
-        for cls in middleware:
-            if hasattr(cls, 'response'):
-                cls.response(self.response)
-
-    def _init_middleware(self):
-        middleware = []
-
-        for cls_path in MIDDLEWARE_CLASSES:
-            # import module and retrieve class
-            cls = getattr(importlib.import_module(cls_path[:cls_path.rfind('.')]), cls_path.split('.')[-1])
-            middleware.append(cls())  # instantiate class
-
-        return middleware
-
-
-class _BarrierHandler(_BaseHandler):
+@csrf_exempt
+@_from_taskqueue_only
+def _barrier_handler(request):
     """Request handler for triggering barriers."""
+    context = _PipelineContext.from_environ(request.META)
+    context.notify_barriers(
+        request.POST.get('slot_key'),
+        request.POST.get('cursor'),
+        use_barrier_indexes=request.POST.get('use_barrier_indexes') == 'True')
 
-    def post(self):
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
-            self.response.set_status(403)
-            return
+    return HttpResponse()
 
-        context = _PipelineContext.from_environ(self.request.environ)
-        context.notify_barriers(
-            self.request.get('slot_key'),
-            self.request.get('cursor'),
-            use_barrier_indexes=self.request.get('use_barrier_indexes') == 'True')
-
-
-class _PipelineHandler(_BaseHandler):
+@csrf_exempt
+@_from_taskqueue_only
+def _pipeline_handler(request):
     """Request handler for running pipelines."""
+    context = _PipelineContext.from_environ(request.META)
+    context.evaluate(request.POST.get('pipeline_key'),
+                     purpose=request.POST.get('purpose'),
+                     attempt=int(request.POST.get('attempt', '0')))
 
-    def post(self):
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
-            self.response.set_status(403)
-            return
+    return HttpResponse()
 
-        context = _PipelineContext.from_environ(self.request.environ)
-        context.evaluate(self.request.get('pipeline_key'),
-                         purpose=self.request.get('purpose'),
-                         attempt=int(self.request.get('attempt', '0')))
-
-
-class _FanoutAbortHandler(_BaseHandler):
+@csrf_exempt
+@_from_taskqueue_only
+def _fanout_abort_handler(request):
     """Request handler for fanning out abort notifications."""
+    context = _PipelineContext.from_environ(request.META)
+    context.continue_abort(
+        request.POST.get('root_pipeline_key'),
+        request.POST.get('cursor'))
 
-    def post(self):
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
-            self.response.set_status(403)
-            return
+    return HttpResponse()
 
-        context = _PipelineContext.from_environ(self.request.environ)
-        context.continue_abort(
-            self.request.get('root_pipeline_key'),
-            self.request.get('cursor'))
-
-
-class _FanoutHandler(_BaseHandler):
+@csrf_exempt
+@_from_taskqueue_only
+def _fanout_handler(request):
     """Request handler for fanning out pipeline children."""
+    context = _PipelineContext.from_environ(request.META)
 
-    def post(self):
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
-            self.response.set_status(403)
-            return
+    # Set of stringified db.Keys of children to run.
+    all_pipeline_keys = set()
 
-        context = _PipelineContext.from_environ(self.request.environ)
+    # For backwards compatibility with the old style of fan-out requests.
+    all_pipeline_keys.update(request.POST.getlist('pipeline_key'))
 
-        # Set of stringified db.Keys of children to run.
-        all_pipeline_keys = set()
+    # Fetch the child pipelines from the parent. This works around the 10KB
+    # task payload limit. This get() is consistent-on-read and the fan-out
+    # task is enqueued in the transaction that updates the parent, so the
+    # fanned_out property is consistent here.
+    parent_key = request.POST.get('parent_key')
+    child_indexes = [int(x) for x in request.POST.getlist('child_indexes')]
+    if parent_key:
+        parent_key = db.Key(parent_key)
+        parent = db.get(parent_key)
+        for index in child_indexes:
+            all_pipeline_keys.add(str(parent.fanned_out[index]))
 
-        # For backwards compatibility with the old style of fan-out requests.
-        all_pipeline_keys.update(self.request.get_all('pipeline_key'))
+    all_tasks = []
+    all_pipelines = db.get([db.Key(pipeline_key) for pipeline_key in all_pipeline_keys])
+    for child_pipeline in all_pipelines:
+        if child_pipeline is None:
+            continue
+        pipeline_key = str(child_pipeline.key())
+        all_tasks.append(taskqueue.Task(
+            url=context.pipeline_handler_path,
+            params=dict(pipeline_key=pipeline_key),
+            target=child_pipeline.params['target'],
+            headers={'X-Ae-Pipeline-Key': pipeline_key},
+            name='ae-pipeline-fan-out-' + child_pipeline.key().name()))
 
-        # Fetch the child pipelines from the parent. This works around the 10KB
-        # task payload limit. This get() is consistent-on-read and the fan-out
-        # task is enqueued in the transaction that updates the parent, so the
-        # fanned_out property is consistent here.
-        parent_key = self.request.get('parent_key')
-        child_indexes = [int(x) for x in self.request.get_all('child_indexes')]
-        if parent_key:
-            parent_key = db.Key(parent_key)
-            parent = db.get(parent_key)
-            for index in child_indexes:
-                all_pipeline_keys.add(str(parent.fanned_out[index]))
-
-        all_tasks = []
-        all_pipelines = db.get([db.Key(pipeline_key) for pipeline_key in all_pipeline_keys])
-        for child_pipeline in all_pipelines:
-            if child_pipeline is None:
-                continue
-            pipeline_key = str(child_pipeline.key())
-            all_tasks.append(taskqueue.Task(
-                url=context.pipeline_handler_path,
-                params=dict(pipeline_key=pipeline_key),
-                target=child_pipeline.params['target'],
-                headers={'X-Ae-Pipeline-Key': pipeline_key},
-                name='ae-pipeline-fan-out-' + child_pipeline.key().name()))
-
-        batch_size = 100  # Limit of taskqueue API bulk add.
-        for i in xrange(0, len(all_tasks), batch_size):
-            batch = all_tasks[i:i + batch_size]
-            try:
-                taskqueue.Queue(context.queue_name).add(batch)
-            except (taskqueue.TombstonedTaskError, taskqueue.TaskAlreadyExistsError):
-                pass
-
-
-class _CleanupHandler(_BaseHandler):
-    """Request handler for cleaning up a Pipeline."""
-
-    def post(self):
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
-            self.response.set_status(403)
-            return
-
-        root_pipeline_key = db.Key(self.request.get('root_pipeline_key'))
-        logging.debug('Cleaning up root_pipeline_key=%r', root_pipeline_key)
-
-        # TODO(user): Accumulate all BlobKeys from _PipelineRecord and
-        # _SlotRecord entities and delete them.
-        pipeline_keys = (
-            _PipelineRecord.all(keys_only=True)
-                .filter('root_pipeline =', root_pipeline_key))
-        db.delete(pipeline_keys)
-        slot_keys = (
-            _SlotRecord.all(keys_only=True)
-                .filter('root_pipeline =', root_pipeline_key))
-        db.delete(slot_keys)
-        barrier_keys = (
-            _BarrierRecord.all(keys_only=True)
-                .filter('root_pipeline =', root_pipeline_key))
-        db.delete(barrier_keys)
-        status_keys = (
-            _StatusRecord.all(keys_only=True)
-                .filter('root_pipeline =', root_pipeline_key))
-        db.delete(status_keys)
-        barrier_index_keys = (
-            _BarrierIndex.all(keys_only=True)
-                .filter('root_pipeline =', root_pipeline_key))
-        db.delete(barrier_index_keys)
-
-
-class _CallbackHandler(_BaseHandler):
-    """Receives asynchronous callback requests from humans or tasks."""
-
-    def post(self):
-        self.get()
-
-    def get(self):
+    batch_size = 100  # Limit of taskqueue API bulk add.
+    for i in xrange(0, len(all_tasks), batch_size):
+        batch = all_tasks[i:i + batch_size]
         try:
-            self.run_callback()
-        except _CallbackTaskError, e:
-            logging.error(str(e))
-            if 'HTTP_X_APPENGINE_TASKRETRYCOUNT' in self.request.environ:
-                # Silently give up on tasks that have retried many times. This
-                # probably means that the target pipeline has been deleted, so there's
-                # no reason to keep trying this task forever.
-                retry_count = int(
-                    self.request.environ.get('HTTP_X_APPENGINE_TASKRETRYCOUNT'))
-                if retry_count > _MAX_CALLBACK_TASK_RETRIES:
-                    logging.error('Giving up on task after %d retries',
-                                  _MAX_CALLBACK_TASK_RETRIES)
-                    return
+            taskqueue.Queue(context.queue_name).add(batch)
+        except (taskqueue.TombstonedTaskError, taskqueue.TaskAlreadyExistsError):
+            pass
 
-            # NOTE: The undescriptive error code 400 are present to address security
-            # risks of giving external users access to cause PipelineRecord lookups
-            # and execution.
-            self.response.set_status(400)
+    return HttpResponse()
 
-    def run_callback(self):
-        """Runs the callback for the pipeline specified in the request.
+@csrf_exempt
+@_from_taskqueue_only
+def _cleanup_handler(request):
+    """Request handler for cleaning up a Pipeline."""
+    root_pipeline_key = db.Key(request.POST.get('root_pipeline_key'))
+    logging.debug('Cleaning up root_pipeline_key=%r', root_pipeline_key)
 
-    Raises:
-      _CallbackTaskError if something was wrong with the request parameters.
-    """
-        pipeline_id = self.request.get('pipeline_id')
+    # TODO(user): Accumulate all BlobKeys from _PipelineRecord and
+    # _SlotRecord entities and delete them.
+    pipeline_keys = (
+        _PipelineRecord.all(keys_only=True)
+            .filter('root_pipeline =', root_pipeline_key))
+    db.delete(pipeline_keys)
+    slot_keys = (
+        _SlotRecord.all(keys_only=True)
+            .filter('root_pipeline =', root_pipeline_key))
+    db.delete(slot_keys)
+    barrier_keys = (
+        _BarrierRecord.all(keys_only=True)
+            .filter('root_pipeline =', root_pipeline_key))
+    db.delete(barrier_keys)
+    status_keys = (
+        _StatusRecord.all(keys_only=True)
+            .filter('root_pipeline =', root_pipeline_key))
+    db.delete(status_keys)
+    barrier_index_keys = (
+        _BarrierIndex.all(keys_only=True)
+            .filter('root_pipeline =', root_pipeline_key))
+    db.delete(barrier_index_keys)
+
+    return HttpResponse()
+
+@csrf_exempt
+def _callback_handler(request):
+    """Receives asynchronous callback requests from humans or tasks."""
+    try:
+        pipeline_id = request.REQUEST.get('pipeline_id')
         if not pipeline_id:
             raise _CallbackTaskError('"pipeline_id" parameter missing.')
 
@@ -2858,7 +2797,7 @@ class _CallbackHandler(_BaseHandler):
                 'Cannot load class named "%s" for pipeline ID "%s".'
                 % (real_class_path, pipeline_id))
 
-        if 'HTTP_X_APPENGINE_TASKNAME' not in self.request.environ:
+        if 'HTTP_X_APPENGINE_TASKNAME' not in request.META:
             if pipeline_func_class.public_callbacks:
                 pass
             elif pipeline_func_class.admin_callbacks:
@@ -2872,9 +2811,9 @@ class _CallbackHandler(_BaseHandler):
                     % pipeline_id)
 
         kwargs = {}
-        for key in self.request.arguments():
+        for key, value in request.REQUEST.items():
             if key != 'pipeline_id':
-                kwargs[str(key)] = self.request.get(key)
+                kwargs[str(key)] = value
 
         def perform_callback():
             stage = pipeline_func_class.from_id(pipeline_id)
@@ -2895,9 +2834,26 @@ class _CallbackHandler(_BaseHandler):
 
         if callback_result is not None:
             status_code, content_type, content = callback_result
-            self.response.set_status(status_code)
-            self.response.headers['Content-Type'] = content_type
-            self.response.out.write(content)
+            return HttpResponse(status=status_code, content=content, content_type=content_type)
+    except _CallbackTaskError, e:
+        logging.error(str(e))
+        if 'HTTP_X_APPENGINE_TASKRETRYCOUNT' in request.META:
+            # Silently give up on tasks that have retried many times. This
+            # probably means that the target pipeline has been deleted, so there's
+            # no reason to keep trying this task forever.
+            retry_count = int(
+                request.META.get('HTTP_X_APPENGINE_TASKRETRYCOUNT'))
+            if retry_count > _MAX_CALLBACK_TASK_RETRIES:
+                logging.error('Giving up on task after %d retries',
+                              _MAX_CALLBACK_TASK_RETRIES)
+                return HttpResponse()
+
+        # NOTE: The undescriptive error code 400 (BadRequest) are present to address security
+        # risks of giving external users access to cause PipelineRecord lookups
+        # and execution.
+        return HttpResponseBadRequest()
+
+    return HttpResponse()
 
 
 ################################################################################
@@ -3333,27 +3289,18 @@ def set_enforce_auth(new_status):
     global _ENFORCE_AUTH
     _ENFORCE_AUTH = new_status
 
-
-def create_handlers_map(prefix='.*'):
-    """Create new handlers map.
-
-  Args:
-    prefix: url prefix to use.
-
-  Returns:
-    list of (regexp, handler) pairs for WSGIApplication constructor.
-  """
-    return [
-        (prefix + '/output', _BarrierHandler),
-        (prefix + '/run', _PipelineHandler),
-        (prefix + '/finalized', _PipelineHandler),
-        (prefix + '/cleanup', _CleanupHandler),
-        (prefix + '/abort', _PipelineHandler),
-        (prefix + '/fanout', _FanoutHandler),
-        (prefix + '/fanout_abort', _FanoutAbortHandler),
-        (prefix + '/callback', _CallbackHandler),
-        (prefix + '/rpc/tree', status_ui._TreeStatusHandler),
-        (prefix + '/rpc/class_paths', status_ui._ClassPathListHandler),
-        (prefix + '/rpc/list', status_ui._RootListHandler),
-        (prefix + '(/.+)', status_ui._StatusUiHandler),
-    ]
+urlpatterns = patterns(
+    'pipeline',
+    url('/output', 'pipeline._barrier_handler'),
+    url('/run', 'pipeline._pipeline_handler'),
+    url('/finalized', 'pipeline._pipeline_handler'),
+    url('/cleanup', 'pipeline._cleanup_handler'),
+    url('/abort', 'pipeline._pipeline_handler'),
+    url('/fanout', 'pipeline._fanout_handler'),
+    url('/fanout_abort', 'pipeline._fanout_abort_handler'),
+    url('/callback', 'pipeline._callback_handler'),
+    url('/rpc/tree', 'status_ui.treestatus_handler'),
+    url('/rpc/class_paths', 'status_ui.classpathlist_handler'),
+    url('/rpc/list', 'status_ui.rootlist_hanlder'),
+    url('(/.+)', 'status_ui.statusui_handler'),
+)
