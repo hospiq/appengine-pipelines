@@ -124,7 +124,7 @@ def _rpc_handler(func):
 
     # XSRF protection
     if (not pipeline._DEBUG and
-        request.META.get('X-Requested-With') != 'XMLHttpRequest'):
+        not request.is_ajax()):
       logging.debug('Request missing X-Requested-With header')
       return HttpResponseForbidden(content='Request missing X-Requested-With header')
 
