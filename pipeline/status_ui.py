@@ -24,6 +24,7 @@ import zipfile
 from functools import wraps
 
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotFound
+from django.shortcuts import redirect
 from django.views.decorators.csrf import csrf_exempt
 from google.appengine.api import users
 
