@@ -76,7 +76,7 @@ def statusui_handler(request, resource=''):
   if pipeline._ENFORCE_AUTH:
     if users.get_current_user() is None:
       logging.debug('User is not logged in')
-      return HttpResponseForbidden()
+      return redirect(users.create_login_url(request.build_absolute_uri()))
 
     if not users.is_current_user_admin():
       logging.debug('User is not admin: %r', users.get_current_user())
