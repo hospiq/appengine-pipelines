@@ -15,6 +15,7 @@
 # limitations under the License.
 
 """Utility functions for use with the Google App Engine Pipeline API."""
+import importlib
 
 __all__ = ["for_name",
            "JsonEncoder",
@@ -243,3 +244,20 @@ def _JsonDecodeKey(d):
     return ndb.Key(urlsafe=d['key_string'])
 
 _register_json_primitive(ndb.Key, _JsonEncodeKey, _JsonDecodeKey)
+
+def import_class_from_string(string):
+    parts = string.split('.')
+    mod = importlib.import_module('.'.join(parts[:-1]))
+    return getattr(mod, parts[-1])
+
+# apply custom JSON shims
+try:
+    JsonEncoder = import_class_from_string(os.getenv('GAE_PIPELINE_JSON_ENCODER'))
+except (ImportError, AttributeError):
+    pass
+
+try:
+    JsonDecoder = import_class_from_string(os.getenv('GAE_PIPELINE_JSON_DECODER'))
+except (ImportError, AttributeError):
+    pass
+
