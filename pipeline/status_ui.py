@@ -153,7 +153,7 @@ def _rpc_handler(func):
 def treestatus_handler(request):
   """RPC handler for getting the status of all children of root pipeline."""
   import pipeline  # Break circular dependency
-  return pipeline.get_status_tree(request.REQUEST.get('root_pipeline_id'))
+  return pipeline.get_status_tree(request.GET.get('root_pipeline_id'))
 
 @csrf_exempt
 @_rpc_handler
@@ -168,5 +168,5 @@ def rootlist_hanlder(request):
   """RPC handler for getting the status of all root pipelines."""
   import pipeline  # Break circular dependency
   return pipeline.get_root_list(
-    class_path=request.REQUEST.get('class_path'),
-    cursor=request.REQUEST.get('cursor'))
+    class_path=request.GET.get('class_path'),
+    cursor=request.GET.get('cursor'))

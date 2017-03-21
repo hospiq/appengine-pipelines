@@ -2778,7 +2778,7 @@ def _cleanup_handler(request):
 def _callback_handler(request):
     """Receives asynchronous callback requests from humans or tasks."""
     try:
-        pipeline_id = request.REQUEST.get('pipeline_id')
+        pipeline_id = request.POST.get('pipeline_id')
         if not pipeline_id:
             raise _CallbackTaskError('"pipeline_id" parameter missing.')
 
@@ -2811,7 +2811,7 @@ def _callback_handler(request):
                     % pipeline_id)
 
         kwargs = {}
-        for key, value in request.REQUEST.items():
+        for key, value in request.POST.items():
             if key != 'pipeline_id':
                 kwargs[str(key)] = value
 
