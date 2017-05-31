@@ -17,9 +17,10 @@
 """Google App Engine Pipeline API for complex, asynchronous workflows."""
 from functools import wraps
 
-from django.conf.urls import patterns, url
+from django.conf.urls import url
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt
+from . import status_ui
 
 __all__ = [
     # Public API.
@@ -3289,18 +3290,17 @@ def set_enforce_auth(new_status):
     global _ENFORCE_AUTH
     _ENFORCE_AUTH = new_status
 
-urlpatterns = patterns(
-    'pipeline',
-    url('output', 'pipeline._barrier_handler'),
-    url('run', 'pipeline._pipeline_handler'),
-    url('finalized', 'pipeline._pipeline_handler'),
-    url('cleanup', 'pipeline._cleanup_handler'),
-    url('fanout_abort', 'pipeline._fanout_abort_handler'),
-    url('abort', 'pipeline._pipeline_handler'),
-    url('fanout', 'pipeline._fanout_handler'),
-    url('callback', 'pipeline._callback_handler'),
-    url('rpc/tree', 'status_ui.treestatus_handler'),
-    url('rpc/class_paths', 'status_ui.classpathlist_handler'),
-    url('rpc/list', 'status_ui.rootlist_hanlder'),
-    url('(/.+)', 'status_ui.statusui_handler'),
-)
+urlpatterns = [
+    url('output', _barrier_handler),
+    url('run', _pipeline_handler),
+    url('finalized', _pipeline_handler),
+    url('cleanup', _cleanup_handler),
+    url('fanout_abort', _fanout_abort_handler),
+    url('abort', _pipeline_handler),
+    url('fanout', _fanout_handler),
+    url('callback', _callback_handler),
+    url('rpc/tree', status_ui.treestatus_handler),
+    url('rpc/class_paths', status_ui.classpathlist_handler),
+    url('rpc/list', status_ui.rootlist_hanlder),
+    url('(/.+)', status_ui.statusui_handler),
+]
