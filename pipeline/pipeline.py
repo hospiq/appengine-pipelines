@@ -520,6 +520,13 @@ class Pipeline(object):
         return None
 
     @property
+    def current_request(self):
+        """Returns the request object of the current context or None if unknown."""
+        if self._context:
+            return self._context.request
+        return None
+
+    @property
     def has_finalized(self):
         """Returns True if this pipeline has completed and finalized."""
         return self._result_status == _PipelineRecord.DONE
@@ -1429,7 +1436,8 @@ class _PipelineContext(object):
     def __init__(self,
                  task_name,
                  queue_name,
-                 base_path):
+                 base_path,
+                 request=None):
         """Initializer.
 
     Args:
@@ -1438,10 +1446,12 @@ class _PipelineContext(object):
       queue_name: The queue this pipeline should run on (may not be the
         current queue this request is on).
       base_path: Relative URL for the pipeline's handlers.
+      request:  Request object that initialized this context if available
     """
         self.task_name = task_name
         self.queue_name = queue_name
         self.base_path = base_path
+        self.request = request
         self.barrier_handler_path = '%s/output' % base_path
         self.pipeline_handler_path = '%s/run' % base_path
         self.finalized_handler_path = '%s/finalized' % base_path
@@ -1451,13 +1461,15 @@ class _PipelineContext(object):
         self.session_filled_output_names = set()
 
     @classmethod
-    def from_environ(cls, environ=os.environ):
+    def from_request(cls, request):
         """Constructs a _PipelineContext from the task queue environment."""
-        base_path, unused = (environ['PATH_INFO'].rsplit('/', 1) + [''])[:2]
+        base_path, unused = (request.META['PATH_INFO'].rsplit('/', 1) + [''])[:2]
         return cls(
-            environ['HTTP_X_APPENGINE_TASKNAME'],
-            environ['HTTP_X_APPENGINE_QUEUENAME'],
-            base_path)
+            request.META['HTTP_X_APPENGINE_TASKNAME'],
+            request.META['HTTP_X_APPENGINE_QUEUENAME'],
+            base_path,
+            request=request,
+        )
 
     def fill_slot(self, filler_pipeline_key, slot, value):
         """Fills a slot, enqueueing a task to trigger pending barriers.
@@ -2666,7 +2678,7 @@ def _from_taskqueue_only(func):
 @_from_taskqueue_only
 def _barrier_handler(request):
     """Request handler for triggering barriers."""
-    context = _PipelineContext.from_environ(request.META)
+    context = _PipelineContext.from_request(request)
     context.notify_barriers(
         request.POST.get('slot_key'),
         request.POST.get('cursor'),
@@ -2678,7 +2690,7 @@ def _barrier_handler(request):
 @_from_taskqueue_only
 def _pipeline_handler(request):
     """Request handler for running pipelines."""
-    context = _PipelineContext.from_environ(request.META)
+    context = _PipelineContext.from_request(request)
     context.evaluate(request.POST.get('pipeline_key'),
                      purpose=request.POST.get('purpose'),
                      attempt=int(request.POST.get('attempt', '0')))
@@ -2689,7 +2701,7 @@ def _pipeline_handler(request):
 @_from_taskqueue_only
 def _fanout_abort_handler(request):
     """Request handler for fanning out abort notifications."""
-    context = _PipelineContext.from_environ(request.META)
+    context = _PipelineContext.from_request(request)
     context.continue_abort(
         request.POST.get('root_pipeline_key'),
         request.POST.get('cursor'))
@@ -2700,7 +2712,7 @@ def _fanout_abort_handler(request):
 @_from_taskqueue_only
 def _fanout_handler(request):
     """Request handler for fanning out pipeline children."""
-    context = _PipelineContext.from_environ(request.META)
+    context = _PipelineContext.from_request(request)
 
     # Set of stringified db.Keys of children to run.
     all_pipeline_keys = set()
