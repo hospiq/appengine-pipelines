@@ -15,8 +15,6 @@
 # limitations under the License.
 
 """Utility functions for use with the Google App Engine Pipeline API."""
-import importlib
-
 __all__ = ["for_name",
            "JsonEncoder",
            "JsonDecoder"]
@@ -24,6 +22,7 @@ __all__ = ["for_name",
 #pylint: disable=g-bad-name
 
 import datetime
+import importlib
 import inspect
 import logging
 import os
@@ -33,6 +32,7 @@ try:
 except ImportError:
   import simplejson as json
 
+from google.appengine.api import modules
 from google.appengine.ext import ndb
 
 # pylint: disable=protected-access
@@ -54,16 +54,27 @@ def _get_task_target():
   if pipeline._TEST_MODE:
     return None
 
-  # Further protect against test cases that doesn't set env vars
-  # propertly.
-  if ("CURRENT_VERSION_ID" not in os.environ or
-      "CURRENT_MODULE_ID" not in os.environ):
-    logging.warning("Running Pipeline in non TEST_MODE but important "
-                    "env vars are not set.")
-    return None
+  # Use the modules API to get module and version, since this is more
+  # reliable than the previous environment variables method.
+  module = modules.get_current_module_name()
+  version = modules.get_current_version_name()
 
-  version = os.environ["CURRENT_VERSION_ID"].split(".")[0]
-  module = os.environ["CURRENT_MODULE_ID"]
+  if (not module and not version):
+    # Further protect against test cases that doesn't set env vars
+    # propertly.
+    if ("CURRENT_VERSION_ID" not in os.environ or
+        "CURRENT_MODULE_ID" not in os.environ):
+      logging.warning("Running Pipeline in non TEST_MODE but important "
+                      "env vars are not set.")
+      return None
+
+    version = os.environ["CURRENT_VERSION_ID"].split(".")[0]
+    module = os.environ["CURRENT_MODULE_ID"]
+
+  if module == "default":
+    return version
+  if version is None:
+    return module
   return "%s.%s" % (version, module)
 
 
