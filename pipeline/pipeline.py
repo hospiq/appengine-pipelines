@@ -556,7 +556,7 @@ class Pipeline(object):
         return cls._class_path
 
     @classmethod
-    def from_id(cls, pipeline_id, resolve_outputs=True, _pipeline_record=None):
+    def from_id(cls, pipeline_id, resolve_outputs=True, _pipeline_record=None, request=None):
         """Returns an instance corresponding to an existing Pipeline.
 
     The returned object will have the same properties a Pipeline does while
@@ -571,6 +571,8 @@ class Pipeline(object):
       _pipeline_record: Internal-only. The _PipelineRecord instance to use
         to instantiate this instance instead of fetching it from
         the datastore.
+      request: A request that will be added to the pipeline context.
+        Used to make current request available to callback methods.
 
     Returns:
       Pipeline sub-class instances or None if it could not be found.
@@ -616,7 +618,7 @@ class Pipeline(object):
         stage.target = params.get('target')  # May not be defined for old Pipelines
         stage._current_attempt = pipeline_record.current_attempt
         stage._set_values_internal(
-            _PipelineContext('', params['queue_name'], params['base_path']),
+            _PipelineContext('', params['queue_name'], params['base_path'], request=request),
             pipeline_key,
             _PipelineRecord.root_pipeline.get_value_for_datastore(pipeline_record),
             outputs,
@@ -2829,7 +2831,7 @@ def _callback_handler(request):
                 kwargs[str(key)] = value
 
         def perform_callback():
-            stage = pipeline_func_class.from_id(pipeline_id)
+            stage = pipeline_func_class.from_id(pipeline_id, request=request)
             if stage is None:
                 raise _CallbackTaskError(
                     'Pipeline ID "%s" deleted during callback' % pipeline_id)
